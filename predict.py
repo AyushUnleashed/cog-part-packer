@@ -14,7 +14,7 @@ import trimesh
 from cog import BasePredictor, Input, Path
 
 # Add PartPacker to Python path so its internal imports work
-partpacker_path = os.path.join(os.path.dirname(__file__), "PartPacker")
+partpacker_path = os.path.join(os.path.dirname(__file__), "partpacker")
 if partpacker_path not in sys.path:
     sys.path.insert(0, partpacker_path)
 
@@ -39,14 +39,32 @@ class Predictor(BasePredictor):
         """Load the model into memory to make running multiple predictions efficient"""
         print("Setting up PartPacker model...")
         
+        # Check GPU memory first
+        if torch.cuda.is_available():
+            print(f"CUDA available: {torch.cuda.get_device_name()}")
+            print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
+            print(f"GPU memory free: {torch.cuda.memory_reserved(0) / 1024**3:.1f}GB")
+        else:
+            raise RuntimeError("CUDA not available!")
+        
         # Download weights if not present
         if not verify_downloads():
             print("Downloading model weights...")
             download_weights()
         
+        print("Weights verified, initializing background remover...")
         # Initialize background remover
         self.bg_remover = rembg.new_session()
         
+        print("Loading checkpoint...")
+        # Load checkpoint FIRST (following original infer.py pattern)
+        ckpt_dict = torch.load("pretrained/flow.pt", weights_only=True)
+        
+        # Extract model weights if nested
+        if "model" in ckpt_dict:
+            ckpt_dict = ckpt_dict["model"]
+        
+        print("Creating model configuration...")
         # Model configuration
         model_config = ModelConfig(
             vae_conf="vae.configs.part_woenc",
@@ -63,39 +81,56 @@ class Predictor(BasePredictor):
             use_parts=True,
         )
         
-        # Initialize model
+        print("Initializing model...")
+        # Initialize model AFTER loading checkpoint
         self.model = Model(model_config).eval().cuda().bfloat16()
         
+        print("Loading weights into model...")
         # Load weights
         try:
-            ckpt_dict = torch.load("pretrained/flow.pt", weights_only=True)
             self.model.load_state_dict(ckpt_dict, strict=True)
             print("PartPacker model loaded successfully!")
+            
+            # Check memory after loading
+            print(f"GPU memory after loading: {torch.cuda.memory_allocated(0) / 1024**3:.1f}GB allocated")
+            print(f"GPU memory reserved: {torch.cuda.memory_reserved(0) / 1024**3:.1f}GB")
+            
         except Exception as e:
             print(f"Error loading model weights: {e}")
             raise e
 
     def process_image(self, image_path: str) -> np.ndarray:
-        """Process input image for the model"""
+        """Process input image for the model - matches original infer.py approach"""
         try:
+            # Try to read image (closest to kiui.read_image behavior)
             image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 raise ValueError(f"Could not load image from {image_path}")
             
+            # Convert to RGBA format (matching kiui.read_image order="RGBA")
             if image.shape[-1] == 4:
                 image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
-            else:
+            elif image.shape[-1] == 3:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                # bg removal if there is no alpha channel
+                # Add alpha channel
+                alpha = np.ones((image.shape[0], image.shape[1], 1), dtype=image.dtype) * 255
+                image = np.concatenate([image, alpha], axis=2)
+            
+            # bg removal if there is no alpha channel or if it's all opaque
+            if image.shape[-1] == 3 or np.all(image[..., -1] == 255):
                 image = rembg.remove(image, session=self.bg_remover)  # [H, W, 4]
             
             mask = image[..., -1] > 0
             if not mask.any():
                 print("Warning: No foreground object detected after background removal")
             
+            # Match original preprocessing exactly
             image = recenter_foreground(image, mask, border_ratio=0.1)
-            image = cv2.resize(image, (518, 518), interpolation=cv2.INTER_AREA)
+            image = cv2.resize(image, (518, 518), interpolation=cv2.INTER_LINEAR)  # Use LINEAR like original
+            image = image.astype(np.float32) / 255.0
+            image = image[..., :3] * image[..., 3:4] + (1 - image[..., 3:4])  # white background
             return image
+            
         except Exception as e:
             raise ValueError(f"Error processing image: {e}")
 
@@ -149,10 +184,8 @@ class Predictor(BasePredictor):
         print("Processing input image...")
         processed_image = self.process_image(str(image))
         
-        # Convert to tensor
-        image_tensor = processed_image.astype(np.float32) / 255.0
-        image_tensor = image_tensor[..., :3] * image_tensor[..., 3:4] + (1 - image_tensor[..., 3:4])  # white background
-        image_tensor = torch.from_numpy(image_tensor).permute(2, 0, 1).contiguous().unsqueeze(0).float().cuda()
+        # Convert to tensor (matching original infer.py exactly)
+        image_tensor = torch.from_numpy(processed_image).permute(2, 0, 1).contiguous().unsqueeze(0).float().cuda()
         
         print(f"🎬 Generating 3D object with {num_steps} steps at {grid_resolution} resolution")
         print(f"⚙️ CFG scale: {cfg_scale}, Seed: {seed}")

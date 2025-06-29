@@ -1,0 +1,25 @@
+# Git files
+.git
+.gitignore
+.gitmodules
+.github
+__pycache__
+# Weights 
+.cache
+
+
+# Env
+.venv
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+
+# Development files
+.vscode
+.idea
+
+# Documentation
+*.md
+README*
