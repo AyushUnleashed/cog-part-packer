@@ -1,4 +1,4 @@
-    """
+"""
 Download PartPacker model weights from Hugging Face Hub
 """
 
