@@ -1,70 +1,49 @@
+"""
+PartPacker Cog Predictor
+Efficient Part-level 3D Object Generation via Dual Volume Packing
+"""
+
 import os
 import sys
 import tempfile
+import zipfile
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import cv2
-import kiui
 import numpy as np
-import rembg
 import torch
-import torch.nn as nn
+from cog import BasePredictor, Input, Path as CogPath
+from PIL import Image
+
+# Add PartPacker submodule to Python path
+PARTPACKER_PATH = os.path.join(os.path.dirname(__file__), "PartPacker")
+sys.path.insert(0, PARTPACKER_PATH)
+
+# Import PartPacker modules after adding to path
+import kiui
+import rembg
 import trimesh
-from cog import BasePredictor, Input, Path
-
-# Add PartPacker to Python path so its internal imports work
-partpacker_path = os.path.join(os.path.dirname(__file__), "partpacker")
-if partpacker_path not in sys.path:
-    sys.path.insert(0, partpacker_path)
-
-# Now import the PartPacker components
 from flow.configs.schema import ModelConfig
 from flow.model import Model
 from flow.utils import get_random_color, recenter_foreground
 from vae.utils import postprocess_mesh
 
-# Import our utility functions and download function
-from download_weights import download_weights, verify_downloads
-
-# Memory optimization setting
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-
-# Constants
-TRIMESH_GLB_EXPORT = np.array([[0, 1, 0], [0, 0, 1], [1, 0, 0]]).astype(np.float32)
-MAX_SEED = np.iinfo(np.int32).max
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
-        print("Setting up PartPacker model...")
         
-        # Check GPU memory first
-        if torch.cuda.is_available():
-            print(f"CUDA available: {torch.cuda.get_device_name()}")
-            print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
-            print(f"GPU memory free: {torch.cuda.memory_reserved(0) / 1024**3:.1f}GB")
-        else:
-            raise RuntimeError("CUDA not available!")
+        # Set environment variable for memory optimization
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
         
-        # Download weights if not present
-        if not verify_downloads():
-            print("Downloading model weights...")
-            download_weights()
-        
-        print("Weights verified, initializing background remover...")
         # Initialize background remover
         self.bg_remover = rembg.new_session()
         
-        print("Loading checkpoint...")
-        # Load checkpoint FIRST (following original infer.py pattern)
-        ckpt_dict = torch.load("pretrained/flow.pt", weights_only=True)
+        # Transformation matrix for GLB export
+        self.TRIMESH_GLB_EXPORT = np.array([[0, 1, 0], [0, 0, 1], [1, 0, 0]]).astype(np.float32)
         
-        # Extract model weights if nested
-        if "model" in ckpt_dict:
-            ckpt_dict = ckpt_dict["model"]
-        
-        print("Creating model configuration...")
         # Model configuration
         model_config = ModelConfig(
             vae_conf="vae.configs.part_woenc",
@@ -81,188 +60,216 @@ class Predictor(BasePredictor):
             use_parts=True,
         )
         
-        print("Initializing model...")
-        # Initialize model AFTER loading checkpoint
+        # Load model
+        print("Loading PartPacker model...")
         self.model = Model(model_config).eval().cuda().bfloat16()
         
-        print("Loading weights into model...")
         # Load weights
-        try:
-            self.model.load_state_dict(ckpt_dict, strict=True)
-            print("PartPacker model loaded successfully!")
-            
-            # Check memory after loading
-            print(f"GPU memory after loading: {torch.cuda.memory_allocated(0) / 1024**3:.1f}GB allocated")
-            print(f"GPU memory reserved: {torch.cuda.memory_reserved(0) / 1024**3:.1f}GB")
-            
-        except Exception as e:
-            print(f"Error loading model weights: {e}")
-            raise e
+        ckpt_dict = torch.load("pretrained/flow.pt", weights_only=True)
+        self.model.load_state_dict(ckpt_dict, strict=True)
+        print("Model loaded successfully!")
 
-    def process_image(self, image_path: str) -> np.ndarray:
-        """Process input image for the model - matches original infer.py approach"""
-        try:
-            # Try to read image (closest to kiui.read_image behavior)
-            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if image is None:
-                raise ValueError(f"Could not load image from {image_path}")
-            
-            # Convert to RGBA format (matching kiui.read_image order="RGBA")
-            if image.shape[-1] == 4:
-                image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
-            elif image.shape[-1] == 3:
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                # Add alpha channel
-                alpha = np.ones((image.shape[0], image.shape[1], 1), dtype=image.dtype) * 255
-                image = np.concatenate([image, alpha], axis=2)
-            
-            # bg removal if there is no alpha channel or if it's all opaque
-            if image.shape[-1] == 3 or np.all(image[..., -1] == 255):
-                image = rembg.remove(image, session=self.bg_remover)  # [H, W, 4]
-            
-            mask = image[..., -1] > 0
-            if not mask.any():
-                print("Warning: No foreground object detected after background removal")
-            
-            # Match original preprocessing exactly
-            image = recenter_foreground(image, mask, border_ratio=0.1)
-            image = cv2.resize(image, (518, 518), interpolation=cv2.INTER_LINEAR)  # Use LINEAR like original
-            image = image.astype(np.float32) / 255.0
-            image = image[..., :3] * image[..., 3:4] + (1 - image[..., 3:4])  # white background
-            return image
-            
-        except Exception as e:
-            raise ValueError(f"Error processing image: {e}")
+    def preprocess_image(self, image_path: str) -> np.ndarray:
+        """Preprocess input image for PartPacker"""
+        
+        # Read image
+        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if image.shape[-1] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+        else:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            # Background removal if no alpha channel
+            image = rembg.remove(image, session=self.bg_remover)
+        
+        # Recenter and resize
+        mask = image[..., -1] > 0
+        image = recenter_foreground(image, mask, border_ratio=0.1)
+        image = cv2.resize(image, (518, 518), interpolation=cv2.INTER_AREA)
+        
+        return image
 
     def predict(
         self,
-        image: Path = Input(
-            description="Input image for 3D object generation"
-        ),
+        image: CogPath = Input(description="Input image for 3D object generation"),
         num_steps: int = Input(
-            description="Number of inference steps (higher = better quality, slower)",
-            default=50,
-            ge=1,
+            description="Number of inference steps", 
+            default=50, 
+            ge=1, 
             le=100
         ),
         cfg_scale: float = Input(
-            description="Classifier-free guidance scale",
-            default=7.0,
-            ge=1.0,
+            description="Classifier-free guidance scale", 
+            default=7.0, 
+            ge=1.0, 
             le=20.0
         ),
         grid_resolution: int = Input(
-            description="Grid resolution for mesh extraction",
-            default=384,
-            ge=256,
+            description="Grid resolution for mesh extraction", 
+            default=384, 
+            ge=256, 
             le=512
         ),
         seed: Optional[int] = Input(
-            description="Random seed for reproducible results (leave blank for random)",
+            description="Random seed for reproducible results", 
             default=None
         ),
         simplify_mesh: bool = Input(
-            description="Simplify the output mesh",
+            description="Whether to simplify the output mesh", 
             default=False
         ),
         target_num_faces: int = Input(
-            description="Target number of faces for mesh simplification",
-            default=100000,
-            ge=10000,
+            description="Target number of faces for mesh simplification", 
+            default=100000, 
+            ge=10000, 
             le=1000000
         ),
-    ) -> Path:
+    ) -> CogPath:
         """Generate 3D object from input image"""
         
-        # Set seed
+        # Set random seed
         if seed is None:
-            seed = int.from_bytes(os.urandom(2), "big")
-        print(f"Using seed: {seed}")
+            seed = np.random.randint(0, 2**31 - 1)
         kiui.seed_everything(seed)
         
-        # Process input image
-        print("Processing input image...")
-        processed_image = self.process_image(str(image))
-        
-        # Convert to tensor (matching original infer.py exactly)
-        image_tensor = torch.from_numpy(processed_image).permute(2, 0, 1).contiguous().unsqueeze(0).float().cuda()
-        
-        print(f"🎬 Generating 3D object with {num_steps} steps at {grid_resolution} resolution")
-        print(f"⚙️ CFG scale: {cfg_scale}, Seed: {seed}")
-        
-        # Prepare data for model
-        data = {"cond_images": image_tensor}
-        
-        # Run inference
-        print("Running flow model inference...")
-        try:
+        # Create temporary working directory
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            
+            # Preprocess image
+            print("Preprocessing image...")
+            input_image = self.preprocess_image(str(image))
+            
+            # Save processed image
+            processed_image_path = temp_path / "processed_input.jpg"
+            processed_display = (input_image[..., :3] * 255).astype(np.uint8)
+            cv2.imwrite(str(processed_image_path), cv2.cvtColor(processed_display, cv2.COLOR_RGB2BGR))
+            
+            # Prepare image tensor
+            image_float = input_image.astype(np.float32) / 255.0
+            image_float = image_float[..., :3] * image_float[..., 3:4] + (1 - image_float[..., 3:4])  # white background
+            image_tensor = torch.from_numpy(image_float).permute(2, 0, 1).contiguous().unsqueeze(0).float().cuda()
+            
+            # Run inference
+            print(f"Running inference with {num_steps} steps, CFG scale {cfg_scale}...")
+            data = {"cond_images": image_tensor}
+            
             with torch.inference_mode():
                 results = self.model(data, num_steps=num_steps, cfg_scale=cfg_scale)
-        except Exception as e:
-            if "memory" in str(e).lower() or "cuda" in str(e).lower():
-                raise RuntimeError(
-                    f"GPU memory error. Try reducing grid_resolution (current: {grid_resolution}) "
-                    f"or num_steps (current: {num_steps})"
-                )
-            raise RuntimeError(f"Error during flow model inference: {e}")
-        
-        latent = results["latent"]
-        
-        # Generate meshes for both parts
-        print("Extracting meshes from latent representation...")
-        data_part0 = {"latent": latent[:, : self.model.config.latent_size, :]}
-        data_part1 = {"latent": latent[:, self.model.config.latent_size :, :]}
-        
-        try:
+            
+            latent = results["latent"]
+            
+            # Extract meshes for both parts
+            print("Extracting meshes...")
+            data_part0 = {"latent": latent[:, :self.model.config.latent_size, :]}
+            data_part1 = {"latent": latent[:, self.model.config.latent_size:, :]}
+            
             with torch.inference_mode():
                 results_part0 = self.model.vae(data_part0, resolution=grid_resolution)
                 results_part1 = self.model.vae(data_part1, resolution=grid_resolution)
-        except Exception as e:
-            if "memory" in str(e).lower() or "cuda" in str(e).lower():
-                raise RuntimeError(
-                    f"GPU memory error during mesh extraction. Try reducing grid_resolution (current: {grid_resolution})"
-                )
-            raise RuntimeError(f"Error during mesh extraction: {e}")
-        
-        # Process meshes
-        if not simplify_mesh:
-            target_num_faces = -1
-        
-        # Part 0
-        vertices, faces = results_part0["meshes"][0]
-        mesh_part0 = trimesh.Trimesh(vertices, faces)
-        mesh_part0.vertices = mesh_part0.vertices @ TRIMESH_GLB_EXPORT.T
-        mesh_part0 = postprocess_mesh(mesh_part0, target_num_faces)
-        parts = mesh_part0.split(only_watertight=False)
-        
-        # Part 1
-        vertices, faces = results_part1["meshes"][0]
-        mesh_part1 = trimesh.Trimesh(vertices, faces)
-        mesh_part1.vertices = mesh_part1.vertices @ TRIMESH_GLB_EXPORT.T
-        mesh_part1 = postprocess_mesh(mesh_part1, target_num_faces)
-        parts.extend(mesh_part1.split(only_watertight=False))
-        
-        # Filter out parts with too few faces
-        parts = [part for part in parts if len(part.faces) > 10]
-        
-        if not parts:
-            raise RuntimeError("No valid mesh parts generated. Try different parameters or input image.")
-        
-        print(f"Generated {len(parts)} valid mesh parts")
-        
-        # Assign different colors to each part
-        for j, part in enumerate(parts):
-            part.visual.vertex_colors = get_random_color(j, use_float=True)
-        
-        # Create scene and export
-        mesh_scene = trimesh.Scene(parts)
-        
-        # Save output
-        output_path = Path(tempfile.mkdtemp()) / "output.glb"
-        try:
-            mesh_scene.export(str(output_path))
-        except Exception as e:
-            raise RuntimeError(f"Error saving mesh: {e}")
-        
-        print(f"✅ Generated 3D object with {len(parts)} parts")
-        return output_path
+            
+            # Process part 0
+            vertices, faces = results_part0["meshes"][0]
+            mesh_part0 = trimesh.Trimesh(vertices, faces)
+            mesh_part0.vertices = mesh_part0.vertices @ self.TRIMESH_GLB_EXPORT.T
+            
+            if simplify_mesh:
+                mesh_part0 = postprocess_mesh(mesh_part0, target_num_faces)
+            else:
+                mesh_part0 = postprocess_mesh(mesh_part0, -1)
+                
+            parts = mesh_part0.split(only_watertight=False)
+            
+            # Process part 1
+            vertices, faces = results_part1["meshes"][0]
+            mesh_part1 = trimesh.Trimesh(vertices, faces)
+            mesh_part1.vertices = mesh_part1.vertices @ self.TRIMESH_GLB_EXPORT.T
+            
+            if simplify_mesh:
+                mesh_part1 = postprocess_mesh(mesh_part1, target_num_faces)
+            else:
+                mesh_part1 = postprocess_mesh(mesh_part1, -1)
+                
+            parts.extend(mesh_part1.split(only_watertight=False))
+            
+            # Filter out tiny parts (< 10 faces)
+            parts = [part for part in parts if len(part.faces) > 10]
+            
+            print(f"Generated {len(parts)} parts")
+            
+            # Assign random colors to parts
+            for j, part in enumerate(parts):
+                part.visual.vertex_colors = get_random_color(j, use_float=True)
+            
+            # Export files
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name = f"partpacker_{timestamp}"
+            
+            # Export combined mesh
+            combined_scene = trimesh.Scene(parts)
+            combined_path = temp_path / f"{base_name}_combined.glb"
+            combined_scene.export(str(combined_path))
+            
+            # Export individual parts
+            part_paths = []
+            for j, part in enumerate(parts):
+                part_path = temp_path / f"{base_name}_part_{j:02d}.glb"
+                part.export(str(part_path))
+                part_paths.append(part_path)
+            
+            # Export dual volumes
+            vol0_path = temp_path / f"{base_name}_volume_0.glb"
+            vol1_path = temp_path / f"{base_name}_volume_1.glb"
+            mesh_part0.export(str(vol0_path))
+            mesh_part1.export(str(vol1_path))
+            
+            # Create zip file with all outputs
+            output_zip_path = temp_path / f"{base_name}_output.zip"
+            
+            with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Add processed input image
+                zipf.write(processed_image_path, "processed_input.jpg")
+                
+                # Add combined mesh
+                zipf.write(combined_path, f"{base_name}_combined.glb")
+                
+                # Add dual volumes
+                zipf.write(vol0_path, f"{base_name}_volume_0.glb")
+                zipf.write(vol1_path, f"{base_name}_volume_1.glb")
+                
+                # Add individual parts
+                for j, part_path in enumerate(part_paths):
+                    zipf.write(part_path, f"parts/{base_name}_part_{j:02d}.glb")
+                
+                # Add generation info
+                info_content = f"""PartPacker Generation Info
+========================
+Timestamp: {timestamp}
+Seed: {seed}
+Inference Steps: {num_steps}
+CFG Scale: {cfg_scale}
+Grid Resolution: {grid_resolution}
+Mesh Simplified: {simplify_mesh}
+Target Faces: {target_num_faces if simplify_mesh else 'No limit'}
+Total Parts Generated: {len(parts)}
+
+Files Included:
+- processed_input.jpg: Preprocessed input image
+- {base_name}_combined.glb: All parts combined with random colors
+- {base_name}_volume_0.glb: First dual volume
+- {base_name}_volume_1.glb: Second dual volume  
+- parts/: Individual part files
+
+Usage:
+The combined GLB file contains all parts and can be imported into Blender, Unity, etc.
+Each part has a different color and can be separated for individual manipulation.
+The dual volumes show the two main components used in the generation process.
+"""
+                zipf.writestr("generation_info.txt", info_content)
+            
+            print(f"Generation complete! Created {len(parts)} parts")
+            
+            # Copy zip to output location
+            final_output_path = f"/tmp/{base_name}_output.zip"
+            os.rename(str(output_zip_path), final_output_path)
+            
+            return CogPath(final_output_path)
