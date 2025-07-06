@@ -15,7 +15,7 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-from cog import BasePredictor, Input, Path as CogPath
+from cog import BasePredictor, Input, BaseModel, Path as CogPath
 from PIL import Image
 
 # Add PartPacker submodule to Python path
@@ -29,12 +29,11 @@ import trimesh
 from flow.model import Model
 from flow.utils import get_random_color, recenter_foreground
 from vae.utils import postprocess_mesh
-from dataclasses import dataclass
 
-@dataclass
-class PredictOutput():
-    output_zip_path: str
-    combined_model_path: str
+
+class PredictOutput(BaseModel):
+    output_zip_path: CogPath | None = None
+    combined_model_path: CogPath | None = None
 
 
 
@@ -117,7 +116,7 @@ class Predictor(BasePredictor):
             ge=10000, 
             le=1000000
         ),
-    ) -> CogPath:
+    ) -> PredictOutput:
         """Generate 3D object from input image"""
         
         # Set random seed
@@ -263,6 +262,12 @@ class Predictor(BasePredictor):
             
             # Copy zip to output location
             final_output_path = f"/tmp/{base_name}_output.zip"
+            final_combined_path = f"/tmp/{base_name}_combined.glb"
             os.rename(str(output_zip_path), final_output_path)
+            os.rename(str(combined_path), final_combined_path)
+
             
-            return PredictOutput(output_zip_path=final_output_path, combined_model_path=combined_path)
+            return PredictOutput(
+                output_zip_path=CogPath(final_output_path),
+                combined_model_path=CogPath(final_combined_path)
+            )
