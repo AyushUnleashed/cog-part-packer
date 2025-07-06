@@ -106,7 +106,7 @@ class Predictor(BasePredictor):
         ),
         target_num_faces: int = Input(
             description="Target number of faces for mesh simplification", 
-            default=-1, 
+            default=100000, 
             ge=10000, 
             le=1000000
         ),
@@ -131,7 +131,7 @@ class Predictor(BasePredictor):
             kiui.write_image(processed_image_path,input_image)
             
             # Prepare image tensor
-            image_tensor = torch.from_numpy(image_float).permute(2, 0, 1).contiguous().unsqueeze(0).float().cuda()
+            image_tensor = torch.from_numpy(input_image).permute(2, 0, 1).contiguous().unsqueeze(0).float().cuda()
             
             # Run inference
             print(f"Running inference with {num_steps} steps, CFG scale {cfg_scale}...")
