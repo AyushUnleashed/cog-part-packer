@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# cog
+.cog/
+pretrained/
+output.zip
+
 # C extensions
 *.so
 
