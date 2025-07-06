@@ -19,7 +19,7 @@ from cog import BasePredictor, Input, Path as CogPath
 from PIL import Image
 
 # Add PartPacker submodule to Python path
-PARTPACKER_PATH = os.path.join(os.path.dirname(__file__), "PartPacker")
+PARTPACKER_PATH = os.path.join(os.path.dirname(__file__), "partpacker")
 sys.path.insert(0, PARTPACKER_PATH)
 
 # Import PartPacker modules after adding to path
@@ -65,7 +65,7 @@ class Predictor(BasePredictor):
 
         # bg removal if there is no alpha channel
         if input_image.shape[-1] == 3:
-            input_image = rembg.remove(input_image, session=bg_remover)  # [H, W, 4]
+            input_image = rembg.remove(input_image, session=self.bg_remover)  # [H, W, 4]
 
         mask = input_image[..., -1] > 0
         image = recenter_foreground(input_image, mask, border_ratio=0.1)
