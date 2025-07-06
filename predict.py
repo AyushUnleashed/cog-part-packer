@@ -15,7 +15,7 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-from cog import BasePredictor, Input, Path as CogPath
+from cog import BasePredictor, Input, BaseModel, Path as CogPath
 from PIL import Image
 
 # Add PartPacker submodule to Python path
@@ -29,6 +29,12 @@ import trimesh
 from flow.model import Model
 from flow.utils import get_random_color, recenter_foreground
 from vae.utils import postprocess_mesh
+
+
+class PredictOutput(BaseModel):
+    output_zip_path: CogPath | None = None
+    combined_model_path: CogPath | None = None
+
 
 
 class Predictor(BasePredictor):
@@ -110,7 +116,7 @@ class Predictor(BasePredictor):
             ge=10000, 
             le=1000000
         ),
-    ) -> CogPath:
+    ) -> PredictOutput:
         """Generate 3D object from input image"""
         
         # Set random seed
@@ -226,35 +232,42 @@ class Predictor(BasePredictor):
                     zipf.write(part_path, f"parts/{base_name}_part_{j:02d}.glb")
                 
                 # Add generation info
-                info_content = f"""PartPacker Generation Info
-========================
-Timestamp: {timestamp}
-Seed: {seed}
-Inference Steps: {num_steps}
-CFG Scale: {cfg_scale}
-Grid Resolution: {grid_resolution}
-Mesh Simplified: {simplify_mesh}
-Target Faces: {target_num_faces if simplify_mesh else 'No limit'}
-Total Parts Generated: {len(parts)}
+                info_content = f"""
+                PartPacker Generation Info
+                ========================
+                Timestamp: {timestamp}
+                Seed: {seed}
+                Inference Steps: {num_steps}
+                CFG Scale: {cfg_scale}
+                Grid Resolution: {grid_resolution}
+                Mesh Simplified: {simplify_mesh}
+                Target Faces: {target_num_faces if simplify_mesh else 'No limit'}
+                Total Parts Generated: {len(parts)}
 
-Files Included:
-- processed_input.jpg: Preprocessed input image
-- {base_name}_combined.glb: All parts combined with random colors
-- {base_name}_volume_0.glb: First dual volume
-- {base_name}_volume_1.glb: Second dual volume  
-- parts/: Individual part files
+                Files Included:
+                - processed_input.jpg: Preprocessed input image
+                - {base_name}_combined.glb: All parts combined with random colors
+                - {base_name}_volume_0.glb: First dual volume
+                - {base_name}_volume_1.glb: Second dual volume  
+                - parts/: Individual part files
 
-Usage:
-The combined GLB file contains all parts and can be imported into Blender, Unity, etc.
-Each part has a different color and can be separated for individual manipulation.
-The dual volumes show the two main components used in the generation process.
-"""
+                Usage:
+                The combined GLB file contains all parts and can be imported into Blender, Unity, etc.
+                Each part can be separated for individual manipulation.
+                The dual volumes show the two main components used in the generation process.
+                """
                 zipf.writestr("generation_info.txt", info_content)
             
             print(f"Generation complete! Created {len(parts)} parts")
             
             # Copy zip to output location
             final_output_path = f"/tmp/{base_name}_output.zip"
+            final_combined_path = f"/tmp/{base_name}_combined.glb"
             os.rename(str(output_zip_path), final_output_path)
+            os.rename(str(combined_path), final_combined_path)
+
             
-            return CogPath(final_output_path)
+            return PredictOutput(
+                output_zip_path=CogPath(final_output_path),
+                combined_model_path=CogPath(final_combined_path)
+            )
