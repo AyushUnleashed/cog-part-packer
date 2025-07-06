@@ -3,6 +3,7 @@ PartPacker Cog Predictor
 Efficient Part-level 3D Object Generation via Dual Volume Packing
 """
 
+import importlib
 import os
 import sys
 import tempfile
@@ -25,7 +26,6 @@ sys.path.insert(0, PARTPACKER_PATH)
 import kiui
 import rembg
 import trimesh
-from flow.configs.schema import ModelConfig
 from flow.model import Model
 from flow.utils import get_random_color, recenter_foreground
 from vae.utils import postprocess_mesh
@@ -35,58 +35,45 @@ class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
         
-        # Set environment variable for memory optimization
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-        
+        # Transformation matrix for GLB export
+        self.TRIMESH_GLB_EXPORT = np.array([[0, 1, 0], [0, 0, 1], [1, 0, 0]]).astype(np.float32)
+
         # Initialize background remover
         self.bg_remover = rembg.new_session()
         
-        # Transformation matrix for GLB export
-        self.TRIMESH_GLB_EXPORT = np.array([[0, 1, 0], [0, 0, 1], [1, 0, 0]]).astype(np.float32)
+        # Load weights
+        ckpt_dict = torch.load("pretrained/flow.pt", weights_only=True)
+
+        # delete all keys other than model
+        if "model" in ckpt_dict:
+            ckpt_dict = ckpt_dict["model"]
         
-        # Model configuration
-        model_config = ModelConfig(
-            vae_conf="vae.configs.part_woenc",
-            vae_ckpt_path="pretrained/vae.pt",
-            qknorm=True,
-            qknorm_type="RMSNorm",
-            use_pos_embed=False,
-            dino_model="dinov2_vitg14",
-            hidden_dim=1536,
-            flow_shift=3.0,
-            logitnorm_mean=1.0,
-            logitnorm_std=1.0,
-            latent_size=4096,
-            use_parts=True,
-        )
+        self.config_file_path = "flow.configs.big_parts_strict_pvae"
+        model_config = importlib.import_module(self.config_file_path).make_config()
         
         # Load model
         print("Loading PartPacker model...")
         self.model = Model(model_config).eval().cuda().bfloat16()
         
-        # Load weights
-        ckpt_dict = torch.load("pretrained/flow.pt", weights_only=True)
+
         self.model.load_state_dict(ckpt_dict, strict=True)
         print("Model loaded successfully!")
 
-    def preprocess_image(self, image_path: str) -> np.ndarray:
-        """Preprocess input image for PartPacker"""
-        
-        # Read image
-        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-        if image.shape[-1] == 4:
-            image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
-        else:
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            # Background removal if no alpha channel
-            image = rembg.remove(image, session=self.bg_remover)
-        
-        # Recenter and resize
-        mask = image[..., -1] > 0
-        image = recenter_foreground(image, mask, border_ratio=0.1)
-        image = cv2.resize(image, (518, 518), interpolation=cv2.INTER_AREA)
-        
+
+    def preprocess_image(self, path):
+        input_image = kiui.read_image(path, mode="uint8", order="RGBA")
+
+        # bg removal if there is no alpha channel
+        if input_image.shape[-1] == 3:
+            input_image = rembg.remove(input_image, session=bg_remover)  # [H, W, 4]
+
+        mask = input_image[..., -1] > 0
+        image = recenter_foreground(input_image, mask, border_ratio=0.1)
+        image = cv2.resize(image, (518, 518), interpolation=cv2.INTER_LINEAR)
+        image = image.astype(np.float32) / 255.0
+        image = image[..., :3] * image[..., 3:4] + (1 - image[..., 3:4])  # white background
         return image
+
 
     def predict(
         self,
@@ -119,7 +106,7 @@ class Predictor(BasePredictor):
         ),
         target_num_faces: int = Input(
             description="Target number of faces for mesh simplification", 
-            default=100000, 
+            default=-1, 
             ge=10000, 
             le=1000000
         ),
@@ -141,12 +128,9 @@ class Predictor(BasePredictor):
             
             # Save processed image
             processed_image_path = temp_path / "processed_input.jpg"
-            processed_display = (input_image[..., :3] * 255).astype(np.uint8)
-            cv2.imwrite(str(processed_image_path), cv2.cvtColor(processed_display, cv2.COLOR_RGB2BGR))
+            kiui.write_image(processed_image_path,input_image)
             
             # Prepare image tensor
-            image_float = input_image.astype(np.float32) / 255.0
-            image_float = image_float[..., :3] * image_float[..., 3:4] + (1 - image_float[..., 3:4])  # white background
             image_tensor = torch.from_numpy(image_float).permute(2, 0, 1).contiguous().unsqueeze(0).float().cuda()
             
             # Run inference
@@ -157,7 +141,8 @@ class Predictor(BasePredictor):
                 results = self.model(data, num_steps=num_steps, cfg_scale=cfg_scale)
             
             latent = results["latent"]
-            
+            # kiui.lo(latent)
+
             # Extract meshes for both parts
             print("Extracting meshes...")
             data_part0 = {"latent": latent[:, :self.model.config.latent_size, :]}
