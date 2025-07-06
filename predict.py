@@ -233,29 +233,30 @@ class Predictor(BasePredictor):
                     zipf.write(part_path, f"parts/{base_name}_part_{j:02d}.glb")
                 
                 # Add generation info
-                info_content = f"""PartPacker Generation Info
-========================
-Timestamp: {timestamp}
-Seed: {seed}
-Inference Steps: {num_steps}
-CFG Scale: {cfg_scale}
-Grid Resolution: {grid_resolution}
-Mesh Simplified: {simplify_mesh}
-Target Faces: {target_num_faces if simplify_mesh else 'No limit'}
-Total Parts Generated: {len(parts)}
+                info_content = f"""
+                PartPacker Generation Info
+                ========================
+                Timestamp: {timestamp}
+                Seed: {seed}
+                Inference Steps: {num_steps}
+                CFG Scale: {cfg_scale}
+                Grid Resolution: {grid_resolution}
+                Mesh Simplified: {simplify_mesh}
+                Target Faces: {target_num_faces if simplify_mesh else 'No limit'}
+                Total Parts Generated: {len(parts)}
 
-Files Included:
-- processed_input.jpg: Preprocessed input image
-- {base_name}_combined.glb: All parts combined with random colors
-- {base_name}_volume_0.glb: First dual volume
-- {base_name}_volume_1.glb: Second dual volume  
-- parts/: Individual part files
+                Files Included:
+                - processed_input.jpg: Preprocessed input image
+                - {base_name}_combined.glb: All parts combined with random colors
+                - {base_name}_volume_0.glb: First dual volume
+                - {base_name}_volume_1.glb: Second dual volume  
+                - parts/: Individual part files
 
-Usage:
-The combined GLB file contains all parts and can be imported into Blender, Unity, etc.
-Each part can be separated for individual manipulation.
-The dual volumes show the two main components used in the generation process.
-"""
+                Usage:
+                The combined GLB file contains all parts and can be imported into Blender, Unity, etc.
+                Each part can be separated for individual manipulation.
+                The dual volumes show the two main components used in the generation process.
+                """
                 zipf.writestr("generation_info.txt", info_content)
             
             print(f"Generation complete! Created {len(parts)} parts")
