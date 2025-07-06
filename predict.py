@@ -29,6 +29,13 @@ import trimesh
 from flow.model import Model
 from flow.utils import get_random_color, recenter_foreground
 from vae.utils import postprocess_mesh
+from dataclasses import dataclass
+
+@dataclass
+class PredictOutput():
+    output_zip_path: str
+    combined_model_path: str
+
 
 
 class Predictor(BasePredictor):
@@ -246,7 +253,7 @@ Files Included:
 
 Usage:
 The combined GLB file contains all parts and can be imported into Blender, Unity, etc.
-Each part has a different color and can be separated for individual manipulation.
+Each part can be separated for individual manipulation.
 The dual volumes show the two main components used in the generation process.
 """
                 zipf.writestr("generation_info.txt", info_content)
@@ -257,4 +264,4 @@ The dual volumes show the two main components used in the generation process.
             final_output_path = f"/tmp/{base_name}_output.zip"
             os.rename(str(output_zip_path), final_output_path)
             
-            return CogPath(final_output_path)
+            return PredictOutput(output_zip_path=final_output_path, combined_model_path=combined_path)
