@@ -10,7 +10,7 @@ import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import cv2
 import numpy as np
@@ -32,8 +32,11 @@ from vae.utils import postprocess_mesh
 
 
 class PredictOutput(BaseModel):
-    output_zip_path: CogPath | None = None
+    # output_zip_path: CogPath | None = None 
     combined_model_path: CogPath | None = None
+    parts: List[CogPath] | None = None
+    volume_0_path: CogPath | None = None
+    volume_1_path: CogPath | None = None
 
 
 
@@ -116,6 +119,10 @@ class Predictor(BasePredictor):
             ge=10000, 
             le=1000000
         ),
+        return_volumes: bool = Input(
+            description="Whether to return the dual volumes",
+            default=False
+        ),
     ) -> PredictOutput:
         """Generate 3D object from input image"""
         
@@ -197,22 +204,31 @@ class Predictor(BasePredictor):
             
             # Export combined mesh
             combined_scene = trimesh.Scene(parts)
-            combined_path = temp_path / f"{base_name}_combined.glb"
-            combined_scene.export(str(combined_path))
+            final_combined_path = f"/tmp/{base_name}_combined.glb"
+            combined_scene.export(final_combined_path)
+
+            final_combined_cog_path = CogPath(final_combined_path)
             
             # Export individual parts
             part_paths = []
             for j, part in enumerate(parts):
-                part_path = temp_path / f"{base_name}_part_{j:02d}.glb"
-                part.export(str(part_path))
-                part_paths.append(part_path)
+                final_part_path = f"/tmp/{base_name}_part_{j:02d}.glb"
+                part.export(final_part_path)
+                part_paths.append(CogPath(final_part_path))
             
-            # Export dual volumes
-            vol0_path = temp_path / f"{base_name}_volume_0.glb"
-            vol1_path = temp_path / f"{base_name}_volume_1.glb"
-            mesh_part0.export(str(vol0_path))
-            mesh_part1.export(str(vol1_path))
+            # Export dual volumes (conditionally)
+            volume_0_path = None
+            volume_1_path = None
+            if return_volumes:
+                final_vol0_path = f"/tmp/{base_name}_volume_0.glb"
+                final_vol1_path = f"/tmp/{base_name}_volume_1.glb"
+                mesh_part0.export(final_vol0_path)
+                mesh_part1.export(final_vol1_path)
+                volume_0_path = CogPath(final_vol0_path)
+                volume_1_path = CogPath(final_vol1_path)
             
+            # COMMENTED OUT: Zip file generation code
+            """
             # Create zip file with all outputs
             output_zip_path = temp_path / f"{base_name}_output.zip"
             
@@ -232,7 +248,7 @@ class Predictor(BasePredictor):
                     zipf.write(part_path, f"parts/{base_name}_part_{j:02d}.glb")
                 
                 # Add generation info
-                info_content = f"""
+                info_content = f'''
                 PartPacker Generation Info
                 ========================
                 Timestamp: {timestamp}
@@ -255,19 +271,19 @@ class Predictor(BasePredictor):
                 The combined GLB file contains all parts and can be imported into Blender, Unity, etc.
                 Each part can be separated for individual manipulation.
                 The dual volumes show the two main components used in the generation process.
-                """
+                '''
                 zipf.writestr("generation_info.txt", info_content)
-            
-            print(f"Generation complete! Created {len(parts)} parts")
             
             # Copy zip to output location
             final_output_path = f"/tmp/{base_name}_output.zip"
-            final_combined_path = f"/tmp/{base_name}_combined.glb"
             os.rename(str(output_zip_path), final_output_path)
-            os.rename(str(combined_path), final_combined_path)
-
+            """
+            
+            print(f"Generation complete! Created {len(parts)} parts")
             
             return PredictOutput(
-                output_zip_path=CogPath(final_output_path),
-                combined_model_path=CogPath(final_combined_path)
+                combined_model_path=final_combined_cog_path if final_combined_cog_path else None,
+                parts=part_paths if part_paths else None,
+                volume_0_path=volume_0_path if volume_0_path else None,
+                volume_1_path=volume_1_path if volume_1_path else None
             )
