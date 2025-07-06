@@ -23,3 +23,7 @@ __pycache__
 # Documentation
 *.md
 README*
+
+
+# others
+output.zip
