@@ -1,4 +1,6 @@
 # PartPacker Cog Wrapper
+![teaser](https://github.com/NVlabs/PartPacker/blob/178d6c9408ecde857e6e716bab2763df6ce8bdc0/assets/teaser.gif?raw=true)
+
 
 This repository contains a Cog wrapper for the PartPacker 3D object generation model.
 
